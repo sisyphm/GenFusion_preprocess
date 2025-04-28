@@ -119,8 +119,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run train and render (outputting videos directly) for multiple scenes using specified GPUs.")
 
     # parser.add_argument("--base_data_dir", type=str, default="/root/code/enhance_4dgs_with_vdm/GenFusion/Reconstruction/data/datasets--Inception3D--GenFusion_DL3DV_24Benchmark/snapshots/5bae7e90bb2613df3e05eba5e9060f54914eb29b", help="Base directory containing all scene folders.")
-    parser.add_argument("--base_data_dir", type=str, default="/root/code/GenFusion_preprocess/test_data", help="Base directory containing all scene folders.")
-    parser.add_argument("--base_output_dir", type=str, default="./data_output", help="Base directory where output for each scene will be stored.")
+    parser.add_argument("--base_data_dir", type=str, default="/home/ubuntu/DL3DV-ALL-ColmapCache/1K", help="Base directory containing all scene folders.")
+    parser.add_argument("--base_output_dir", type=str, default="./1K_tmp", help="Base directory where output for each scene will be stored.")
     parser.add_argument('--iterations', type=int, default=7000)
     parser.add_argument('--test_iterations', type=int, default=7000)
     parser.add_argument('--diffusion_ckpt', type=str, default="./diffusion_ckpt/epoch=59-step=34000.ckpt")
@@ -145,7 +145,7 @@ if __name__ == "__main__":
     parser.add_argument("--detect_anomaly", action="store_true")
     parser.add_argument("--gpu_ids", type=int, nargs='+', default=None, help="List of GPU IDs to use (e.g., 0 1 3). Defaults to all available CUDA GPUs.")
     parser.add_argument("--video_fps", type=int, default=15, help="FPS for the generated videos.")
-    parser.add_argument("--output_video_base_dir", type=str, default="./DL3DV-dataset", help="Base directory to save the output videos (e.g., ./DL3DV-dataset).")
+    parser.add_argument("--output_video_base_dir", type=str, default="./DL3DV-Processed-dataset", help="Base directory to save the output videos (e.g., ./DL3DV-dataset).")
     parser.add_argument("--start_idx", type=float, default=0.0, help="Starting fraction of scenes to process (e.g., 0.0 for the beginning).")
     parser.add_argument("--end_idx", type=float, default=1.0, help="Ending fraction of scenes to process (e.g., 0.1 for the first 10%%). Exclusive.")
 
