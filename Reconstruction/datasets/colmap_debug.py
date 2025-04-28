@@ -397,48 +397,25 @@ class Dataset:
         self.args = args
         indices = np.arange(len(self.parser.image_names))
 
-        ##########mip360 for sparse view#########
-        if self.args.outpaint_type == "sparse" and sparse_view > 0:
-            split_file = os.path.join(
-                self.parser.data_dir, f"train_test_split_{sparse_view}.json"
-            )
-            if os.path.exists(split_file):
-                with open(split_file, "r") as f:
-                    print("split type: ", split)
-                    split_data = json.load(f)
-                    if split == "train":
-                        self.indices = np.array(split_data["train_ids"])
-                        self.parser.filter_points_sparse(self.indices)
-                    else:
-                        self.indices = np.array(split_data["test_ids"])
-                    print(f"Loaded {split} indices from {split_file}")
-        #########Other dataset for dense view (crop)#########
-        elif self.args.outpaint_type == "crop":
-            if split == "train":
-                factor = int(self.args.downsample_factor)
-                self.indices = indices[::factor]  # Select every other index
-                print("train indices", self.indices)
-                self.parser.filter_points_sparse(self.indices)
-            else:
-                factor = int(self.args.downsample_factor)
-                self.indices = indices[~np.isin(indices, indices[::factor])]
-                print("test indices", self.indices)
-        else:
-            # completion
-            if split == "train":
-                if sparse_view > 0:
-                    idx_sub = np.linspace(0, len(indices) - 1, sparse_view)
-                    idx_sub = [round(i) for i in idx_sub]
-                    self.indices = [self.indices[i] for i in idx_sub]
-                else:
-                    factor = int(self.args.downsample_factor)
-                    self.indices = indices[::factor]  # Select every other index
-                    print("train indices", self.indices)
-                    self.parser.filter_points_sparse(self.indices)
-                self.parser.filter_points_sparse(self.indices)
-            else:
-                self.indices = indices[indices % self.parser.test_every == 0]
-                print("test indices", self.indices)
+        # --- 수정: 162 프레임 제한 및 짝/홀수 분할 --- 
+        print(f"Original number of frames found: {len(indices)}")
+        if len(indices) > 162:
+            print("Limiting to the first 162 frames.")
+            indices = indices[:162]
+        elif len(indices) < 162:
+             print(f"Warning: Found only {len(indices)} frames, less than the expected 162.")
+        
+        if split == "train":
+            # 짝수 인덱스(0, 2, 4, ...)를 Train으로 사용
+            self.indices = indices[::2] 
+            print(f"Using {len(self.indices)} frames for TRAIN (even indices):", self.indices)
+            # Train 세트만 filter_points_sparse 호출 (원래 로직과 유사하게)
+            self.parser.filter_points_sparse(self.indices)
+        else: # split == "test"
+            # 홀수 인덱스(1, 3, 5, ...)를 Test로 사용
+            self.indices = indices[1::2]
+            print(f"Using {len(self.indices)} frames for TEST (odd indices):", self.indices)
+        # --- 수정 끝 ---
 
         if len(self.patch_size):
             if (

@@ -17,10 +17,13 @@ from tqdm import tqdm
 from utils.render_utils import save_img_f32, save_img_u8
 from functools import partial
 import open3d as o3d
-import imageio
+# import imageio # <<--- 주석 처리 또는 삭제
+from easy_video import EasyWriter # <<--- 원래 임포트로 복구
+# import easy_video.video as ev_video # <<--- 이전 시도 주석 처리
 from utils.camera_utils import Camera
 import matplotlib.pyplot as plt
 import matplotlib
+from PIL import Image # <<--- 추가
 
 
 def post_process_mesh(mesh, cluster_to_keep=1000):
@@ -359,42 +362,117 @@ class GaussianExtractor(object):
 
     @torch.no_grad()
     def export_image(self, path):
-        render_path = os.path.join(path, "renders")
-        gts_path = os.path.join(path, "gt")
-        vis_path = os.path.join(path, "vis")
-        os.makedirs(render_path, exist_ok=True)
-        os.makedirs(vis_path, exist_ok=True)
-        os.makedirs(gts_path, exist_ok=True)
-
-        cmap = matplotlib.colormaps.get_cmap("Spectral_r")
-
-        for idx, name in tqdm(enumerate(self.names), desc="export images"):
-            if len(self.image_gts):
+        print("Exporting images for {} views...".format(len(self.rgbmaps)))
+        os.makedirs(os.path.join(path, "gt"), exist_ok=True)
+        os.makedirs(os.path.join(path, "renders"), exist_ok=True)
+        os.makedirs(os.path.join(path, "vis"), exist_ok=True)
+        cmap = matplotlib.colormaps.get_cmap("jet")
+        for i in tqdm(range(len(self.rgbmaps)), desc="export images progress"):
+            name = self.names[i]
+            if len(self.image_gts) > 0:
                 save_img_u8(
-                    self.image_gts[idx].permute(1, 2, 0).cpu().numpy(),
-                    os.path.join(gts_path, name),
+                    self.image_gts[i].cpu().permute(1, 2, 0).numpy(),
+                    os.path.join(path, "gt", name),
                 )
-            save_img_u8(
-                self.rgbmaps[idx].permute(1, 2, 0).cpu().numpy(),
-                os.path.join(render_path, name),
-            )
 
-            depth = self.depthmaps[idx][0].cpu().numpy()
-            mask = depth > 0
-            disparity = np.zeros_like(depth)
-            disparity[mask] = 1.0 / (depth[mask] + 1e-6)
-            # Only normalize the non-zero regions
-            if mask.any():
-                disparity[mask] = (disparity[mask] - disparity[mask].min()) / (
-                    disparity[mask].max() - disparity[mask].min()
-                )
-            color_depth_map = (cmap(disparity)[:, :, :3] * 255).astype(np.uint8)
-            cv2.imwrite(
-                os.path.join(vis_path, name),
-                cv2.cvtColor(color_depth_map, cv2.COLOR_RGB2BGR),
+            save_img_u8(
+                self.rgbmaps[i].cpu().permute(1, 2, 0).numpy(),
+                os.path.join(path, "renders", name),
             )
-            # save_img_u8(self.normals[idx].permute(1,2,0).cpu().numpy() * 0.5 + 0.5, os.path.join(vis_path, 'normal_{0:05d}'.format(idx) + ".png"))
-            # save_img_u8(self.depth_normals[idx].permute(1,2,0).cpu().numpy() * 0.5 + 0.5, os.path.join(vis_path, 'depth_normal_{0:05d}'.format(idx) + ".png"))
+            depth_map = self.depthmaps[i][0].cpu().numpy()
+            save_img_f32(depth_map, os.path.join(path, "vis", name.replace(".png", ".tiff")))
+            depth_map = (
+                cmap(depth_map / (np.percentile(depth_map, 95) + 1e-5))
+                * (depth_map > 1e-5)[..., None]
+            )
+            save_img_u8(depth_map, os.path.join(path, "vis", name))
+
+    @torch.no_grad()
+    def export_video_easy_test(self, gt_video_path, render_video_path, depth_video_path, fps=15):
+        """EasyWriter를 사용하여 Test 세트의 GT, Rendered RGB, Depth를 비디오로 저장합니다."""
+        print(f"Exporting videos using EasyWriter...")
+        print(f"  - GT Video: {gt_video_path}")
+        print(f"  - Rendered Video: {render_video_path}")
+        print(f"  - Depth Video: {depth_video_path}")
+
+        if not self.viewpoint_stack: # reconstruction이 호출되지 않은 경우
+            print("  Warning: No reconstruction data found. Run reconstruction first.")
+            return
+
+        try:
+            # 1. GT 비디오 저장 (self.image_gts 사용)
+            if self.image_gts:
+                print(f"  Processing {len(self.image_gts)} GT frames...")
+                # (C, H, W) -> (H, W, C) NumPy 배열로 변환
+                gt_frames = [img.permute(1, 2, 0).cpu().numpy() for img in self.image_gts]
+                # [0, 1] float -> [0, 255] uint8 변환
+                gt_frames_uint8 = [
+                    np.clip(frame * 255, 0, 255).astype(np.uint8)
+                    for frame in gt_frames
+                ]
+                gt_video_array = np.stack(gt_frames_uint8, axis=0) # (T, H, W, C)
+                os.makedirs(os.path.dirname(gt_video_path), exist_ok=True)
+                EasyWriter.writefile(filename=gt_video_path, video_array=gt_video_array, video_fps=fps, silent=False)
+                print(f"    GT video saved successfully.")
+            else:
+                print("  Warning: No Ground Truth images found to create GT video.")
+
+            # 2. Rendered RGB 비디오 저장 (self.rgbmaps 사용)
+            if self.rgbmaps:
+                print(f"  Processing {len(self.rgbmaps)} Rendered RGB frames...")
+                # (C, H, W) -> (H, W, C) NumPy 배열로 변환
+                render_frames = [img.permute(1, 2, 0).cpu().numpy() for img in self.rgbmaps]
+                 # [0, 1] float -> [0, 255] uint8 변환
+                render_frames_uint8 = [
+                    np.clip(frame * 255, 0, 255).astype(np.uint8)
+                    for frame in render_frames
+                ]
+                render_video_array = np.stack(render_frames_uint8, axis=0) # (T, H, W, C)
+                os.makedirs(os.path.dirname(render_video_path), exist_ok=True)
+                EasyWriter.writefile(filename=render_video_path, video_array=render_video_array, video_fps=fps, silent=False)
+                print(f"    Rendered RGB video saved successfully.")
+            else:
+                print("  Warning: No Rendered RGB maps found to create video.")
+
+            # 3. Rendered Depth 비디오 저장 (self.depthmaps 사용 - Grayscale)
+            if self.depthmaps:
+                print(f"  Processing {len(self.depthmaps)} Rendered Depth frames (Grayscale)... ")
+                # 전체 깊이 값 범위 계산 (정규화용)
+                all_depths = torch.stack(self.depthmaps).numpy() # (T, 1, H, W)
+                valid_depths = all_depths[all_depths > 1e-5] # 유효한 깊이 값만
+                if len(valid_depths) > 0:
+                    min_depth, max_depth = np.min(valid_depths), np.percentile(valid_depths, 99) # 이상치 제외
+                    if max_depth <= min_depth: max_depth = min_depth + 1e-5 # 분모 0 방지
+                else:
+                     min_depth, max_depth = 0, 1 # 유효 깊이 없으면 기본 범위
+
+                # Convert normalized depth to colormap image
+                cmap = matplotlib.colormaps.get_cmap('inferno_r') # Use reversed inferno colormap
+                depth_video_frames = []
+                for i in range(all_depths.shape[0]):
+                    depth_map = all_depths[i, 0] # (H, W)
+                    # 정규화 [0, 1]
+                    normalized_depth = (depth_map - min_depth) / (max_depth - min_depth)
+                    normalized_depth = np.clip(normalized_depth, 0, 1)
+                    # Apply colormap (returns RGBA float 0-1), take RGB, scale to 0-255 uint8
+                    colored_depth = (cmap(normalized_depth)[:, :, :3] * 255).astype(np.uint8)
+                    depth_video_frames.append(colored_depth)
+                depth_video_array = np.stack(depth_video_frames, axis=0) # (T, H, W, C)
+
+                # Write video file
+                print(f"    Saving depth video to: {depth_video_path}")
+                os.makedirs(os.path.dirname(depth_video_path), exist_ok=True)
+                EasyWriter.writefile(filename=depth_video_path, video_array=depth_video_array, video_fps=fps, silent=False)
+                print(f"    Rendered Depth video (Grayscale) saved successfully.")
+            else:
+                print("  Warning: No Rendered Depth maps found to create video.")
+
+        except ImportError:
+             print(f"  Error: Could not import EasyWriter from easy_video. Please ensure 'easy_video' library is installed correctly.")
+        except Exception as e:
+            print(f"  Error during EasyWriter video export: {e}")
+            import traceback
+            traceback.print_exc()
 
     @torch.no_grad()
     def export_video(self, path):

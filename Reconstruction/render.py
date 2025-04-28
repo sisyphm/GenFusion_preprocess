@@ -21,7 +21,8 @@ from utils.general_utils import safe_state
 from argparse import ArgumentParser
 from arguments import DataParams, ModelParams, PipelineParams, get_combined_args
 from gaussian_renderer import GaussianModel
-from utils.mesh_utils import GaussianExtractor, to_cam_open3d, post_process_mesh
+from utils.mesh_utils import to_cam_open3d, post_process_mesh
+from utils.mesh_utils import GaussianExtractor
 from utils.render_utils import generate_path
 
 import open3d as o3d
@@ -33,11 +34,8 @@ if __name__ == "__main__":
     model = ModelParams(parser, sentinel=True)
     pipeline = PipelineParams(parser)
     parser.add_argument("--iteration", default=-1, type=int)
-    parser.add_argument("--skip_train", action="store_true")
-    parser.add_argument("--skip_test", action="store_true")
     parser.add_argument("--skip_mesh", action="store_true")
     parser.add_argument("--quiet", action="store_true")
-    parser.add_argument("--render_path", action="store_true")
     parser.add_argument(
         "--voxel_size", default=-1.0, type=float, help="Mesh: voxel size for TSDF"
     )
@@ -73,13 +71,13 @@ if __name__ == "__main__":
     )
     parser.add_argument("--video_only", action="store_true", help="only render video")
     parser.add_argument("--camera_path_file", type=str, default=None)
-
-    # args = parser.parse_args(sys.argv[1:])
+    parser.add_argument("--output_video_base_dir", type=str, default="./render_videos", help="Base directory to save the output videos.")
+    parser.add_argument("--video_fps", type=int, default=15, help="FPS for the generated videos.")
 
     args = get_combined_args(parser)
     print("Rendering " + args.model_path)
-    args.mono_depth = False
-    args.repair = False
+    scene_name = os.path.basename(os.path.normpath(args.model_path))
+    print(f"Detected scene name: {scene_name}")
 
     dataset_args = dp.extract(args)
     args.dataset = dataset_args
@@ -88,41 +86,38 @@ if __name__ == "__main__":
     pipe = pipeline.extract(args)
     gaussians = GaussianModel(model_args.sh_degree)
     scene = Scene(
-        model_args.model_path, args, gaussians, load_iteration=iteration, shuffle=False
+        args.model_path, args, gaussians, load_iteration=iteration, shuffle=False
     )
     bg_color = [1, 1, 1] if model_args.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
-    train_dir = os.path.join(args.model_path, "train")
-    test_dir = os.path.join(args.model_path, "test")
     gaussExtractor = GaussianExtractor(gaussians, render, pipe, bg_color=bg_color)
-    if not args.video_only:
-        if not args.skip_train:
-            print("export training images ...")
-            os.makedirs(train_dir, exist_ok=True)
-            gaussExtractor.reconstruction(
-                [scene.getTrainInstant() for _ in range(len(scene.trainset))]
-            )
-            gaussExtractor.export_image(train_dir)
 
-        if (not args.skip_test) and (len(scene.valset) > 0):
-            print("export rendered testing images ...")
-            os.makedirs(test_dir, exist_ok=True)
-            gaussExtractor.reconstruction(
-                [scene.getTestInstant() for _ in range(len(scene.valset))]
-            )
-            gaussExtractor.export_image(test_dir)
+    if not args.skip_mesh:
+        print("Mesh extraction logic (if enabled) remains unchanged.")
 
-    if args.render_path:
-        print("render videos ...")
-        traj_dir = os.path.join(args.model_path, "videos")
-        os.makedirs(traj_dir, exist_ok=True)
-        n_frames = 120
-        print(f"len(scene.valset): {len(scene.valset)}")
-        cam_traj = generate_path(
-            [scene.getTrainInstant() for _ in range(len(scene.trainset))],
-            args=args,
-            n_frames=n_frames,
+    print("\nProcessing Test set for video export...")
+    if len(scene.valset) > 0:
+        print(f"Found {len(scene.valset)} test views. Performing reconstruction...")
+        gaussExtractor.reconstruction(
+            [scene.getTestInstant() for _ in range(len(scene.valset))]
         )
-        gaussExtractor.reconstruction(cam_traj)
-        gaussExtractor.export_video(traj_dir + f"/{scene.loaded_iter}")
+
+        gt_video_dir = os.path.join(args.output_video_base_dir, "gt_videos")
+        render_video_dir = os.path.join(args.output_video_base_dir, "rendered_videos")
+        depth_video_dir = os.path.join(args.output_video_base_dir, "rendered_depth_videos")
+
+        gt_video_path = os.path.join(gt_video_dir, f"{scene_name}.mp4")
+        render_video_path = os.path.join(render_video_dir, f"{scene_name}.mp4")
+        depth_video_path = os.path.join(depth_video_dir, f"{scene_name}.mp4")
+
+        gaussExtractor.export_video_easy_test(
+            gt_video_path=gt_video_path,
+            render_video_path=render_video_path,
+            depth_video_path=depth_video_path,
+            fps=args.video_fps
+        )
+    else:
+        print("No test views found in the scene. Skipping video export.")
+
+    print(f"\nFinished processing scene: {scene_name}")
