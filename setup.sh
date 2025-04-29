@@ -5,6 +5,9 @@ conda env create --file environment.yml || echo "Environment $ENV_NAME already e
 
 cd Reconstruction
 
+apt-get update
+apt-get install -y gcc-9 g++-9
+
 echo "Installing simple-knn in $ENV_NAME environment..."
 conda run -n $ENV_NAME --no-capture-output --live-stream bash -c "CC=gcc-9 CXX=g++-9 pip install submodules/simple-knn"
 
