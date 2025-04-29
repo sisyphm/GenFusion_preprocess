@@ -3,11 +3,14 @@ import zipfile
 import shutil
 import logging
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import os
 
 #---------------- Configuration ----------------#
-SRC_ROOT = Path("/home/ubuntu/DL3DV-ALL-960P")       # DL3DV-ALL-960P 최상위 경로
-DST_ROOT = Path("/home/ubuntu/DL3DV-ALL-ColmapCache")  # DL3DV-ALL-ColmapCache 최상위 경로
+SRC_ROOT = Path("/workspace/DL3DV-ALL-960P")       # DL3DV-ALL-960P 최상위 경로
+DST_ROOT = Path("/workspace/DL3DV-ALL-ColmapCache")  # DL3DV-ALL-ColmapCache 최상위 경로
 LOG_FILE = Path("transfer_images4.log")            # 로그 파일 경로
+NUM_WORKERS = os.cpu_count() or 4                  # 병렬 워커 수 (None이면 기본값)
 #-----------------------------------------------#
 
 def setup_logging():
@@ -22,12 +25,6 @@ def setup_logging():
 
 
 def extract_and_flatten(zip_path: Path, extract_dir: Path) -> Path:
-    """
-    zip_path이 존재하면 extract_dir에 압축 해제.
-    이미 extract_dir이 있으면 그대로 사용.
-    내부에 중첩된 scene 폴더가 있으면 평탄화.
-    zip 파일은 추출 성공 후에만 삭제하도록 별도 처리.
-    """
     if extract_dir.exists():
         logging.info(f"Directory exists, skipping extraction: {extract_dir}")
         return extract_dir
@@ -35,7 +32,7 @@ def extract_and_flatten(zip_path: Path, extract_dir: Path) -> Path:
         logging.info(f"Extracting {zip_path} → {extract_dir}")
         with zipfile.ZipFile(zip_path, 'r') as zf:
             zf.extractall(extract_dir)
-        # 중첩된 scene 폴더 평탄화
+        # 중첩된 폴더 평탄화
         nested = extract_dir / extract_dir.name
         if nested.exists() and nested.is_dir():
             logging.info(f"Flattening nested directory {nested}")
@@ -51,9 +48,6 @@ def extract_and_flatten(zip_path: Path, extract_dir: Path) -> Path:
 
 
 def flatten_dst_dir(dst_dir: Path, scene: str):
-    """
-    DST extract 디렉토리에서 중첩된 scene 폴더가 있으면 평탄화.
-    """
     nested = dst_dir / scene
     if nested.exists() and nested.is_dir():
         logging.info(f"Flattening nested DST directory {nested}")
@@ -67,9 +61,6 @@ def flatten_dst_dir(dst_dir: Path, scene: str):
 
 
 def find_images4_folder(extract_dir: Path) -> Path:
-    """
-    extract_dir 하위에서 images_4 폴더를 재귀 탐색하여 반환.
-    """
     candidates = list(extract_dir.rglob("images_4"))
     if not candidates:
         return None
@@ -79,16 +70,8 @@ def find_images4_folder(extract_dir: Path) -> Path:
 
 
 def process_scene(res_dir: Path, scene: str):
-    """
-    하나의 씬을 처리:
-      1) SRC zip 추출 및 평탄화
-      2) images_4 폴더 탐색
-      3) DST zip 추출 및 평탄화
-      4) images_4 이동
-      5) 성공 시 zip 및 임시 폴더 정리
-    """
     try:
-        # 1) SRC 준비
+        # 1) SRC 처리
         src_zip = res_dir / f"{scene}.zip"
         src_extract = res_dir / scene
         src_dir = extract_and_flatten(src_zip, src_extract)
@@ -96,14 +79,14 @@ def process_scene(res_dir: Path, scene: str):
             logging.error(f"Source not found for {scene}, skipping.")
             return
 
-        # 2) images_4 탐색
+        # 2) images_4 찾기
         src_images = find_images4_folder(src_dir)
         if not src_images or not src_images.is_dir():
             logging.error(f"Missing images_4 in {src_dir}, will retry later.")
             shutil.rmtree(src_dir, ignore_errors=True)
             return
 
-        # 3) DST 준비
+        # 3) DST 처리
         dst_res_dir = DST_ROOT / res_dir.name
         dst_zip = dst_res_dir / f"{scene}.zip"
         dst_extract = dst_res_dir / scene
@@ -114,7 +97,7 @@ def process_scene(res_dir: Path, scene: str):
             dst_extract.mkdir(parents=True, exist_ok=True)
             dst_dir = dst_extract
 
-        # 4) images_4 이동
+        # 4) 이동
         dst_colmap = dst_dir / "colmap"
         dst_images = dst_colmap / "images_4"
         dst_colmap.mkdir(parents=True, exist_ok=True)
@@ -124,14 +107,11 @@ def process_scene(res_dir: Path, scene: str):
         logging.info(f"Moving {src_images} → {dst_images}")
         shutil.move(str(src_images), str(dst_images))
 
-        # 5) 성공 시 정리
-        # SRC zip 삭제
+        # 5) 정리
         if src_zip.exists():
             logging.info(f"Deleting source zip {src_zip}")
             src_zip.unlink()
-        # SRC extract 폴더 삭제
         shutil.rmtree(src_dir)
-        # DST zip 삭제
         if dst_zip.exists():
             logging.info(f"Deleting DST zip {dst_zip}")
             dst_zip.unlink()
@@ -145,14 +125,25 @@ def main():
     setup_logging()
     logging.info("=== Start processing all scenes ===")
 
+    # 모든 씬 리스트 수집
+    tasks = []
     for res_dir in sorted(SRC_ROOT.iterdir()):
         if not res_dir.is_dir() or res_dir.name == ".cache":
             continue
-        scenes = set()
-        scenes.update(p.stem for p in res_dir.glob("*.zip"))
-        scenes.update(d.name for d in res_dir.iterdir() if d.is_dir() and d.name != ".cache")
+        scenes = set(p.stem for p in res_dir.glob("*.zip"))
+        scenes |= set(d.name for d in res_dir.iterdir() if d.is_dir() and d.name != ".cache")
         for scene in sorted(scenes):
-            process_scene(res_dir, scene)
+            tasks.append((res_dir, scene))
+
+    # 병렬 처리
+    with ThreadPoolExecutor(max_workers=NUM_WORKERS) as executor:
+        future_to_task = {executor.submit(process_scene, res_dir, scene): (res_dir, scene) for res_dir, scene in tasks}
+        for future in as_completed(future_to_task):
+            res_dir, scene = future_to_task[future]
+            try:
+                future.result()
+            except Exception as e:
+                logging.exception(f"Exception in {scene} at {res_dir.name}: {e}")
 
     logging.info("=== All done ===")
 
