@@ -22,6 +22,7 @@ from utils.camera_utils import CameraInfo
 import torchvision
 import sys
 import os
+import time
 # import depth_pro
 # depth_estimator, transform = depth_pro.create_model_and_transforms()
 
@@ -397,7 +398,7 @@ class Dataset:
         self.args = args
         indices = np.arange(len(self.parser.image_names))
 
-        # --- 수정: 162 프레임 제한 및 짝/홀수 분할 --- 
+        # --- 수정: 162 프레임 제한 및 짝/홀수 분할 ---
         print(f"Original number of frames found: {len(indices)}")
         if len(indices) > 162:
             print("Limiting to the first 162 frames.")
@@ -406,55 +407,59 @@ class Dataset:
              print(f"Warning: Found only {len(indices)} frames, less than the expected 162.")
         
         if split == "train":
-            # 짝수 인덱스(0, 2, 4, ...)를 Train으로 사용
-            self.indices = indices[::2] 
+            self.indices = indices[::2]
             print(f"Using {len(self.indices)} frames for TRAIN (even indices):", self.indices)
-            # Train 세트만 filter_points_sparse 호출 (원래 로직과 유사하게)
-            self.parser.filter_points_sparse(self.indices)
         else: # split == "test"
-            # 홀수 인덱스(1, 3, 5, ...)를 Test로 사용
             self.indices = indices[1::2]
             print(f"Using {len(self.indices)} frames for TEST (odd indices):", self.indices)
         # --- 수정 끝 ---
 
-        if len(self.patch_size):
-            if (
-                self.args.outpaint_type == "crop"
-            ):
-                traj_path = "./trajectories.npy"
-                assert os.path.exists(traj_path), (
-                    f"Trajectory file {traj_path} does not exist."
-                )
-                self.trajectories = np.load(traj_path)
-                bounding_boxes = [
-                    (x, y, int(self.patch_size[0]), int(self.patch_size[1]))
-                    for x, y in self.trajectories
-                ]
+        # --- 수정: 고정된 랜덤 사분면 크롭 좌표 설정 ---
+        self.fixed_x_start = 0
+        self.fixed_y_start = 0
+        self.trajectories = None # 기존 trajectory 로직 사용 안 함
 
-            elif (
-                "SMERF" in self.parser.data_dir
-                or "tandt" in self.parser.data_dir
-                or "TNT_GOF" in self.parser.data_dir
-            ):
-                traj_path = os.path.join(self.parser.data_dir, "trajectories.npy")
-                assert os.path.exists(traj_path), (
-                    f"Trajectory file {traj_path} does not exist."
-                )
-                self.trajectories = np.load(traj_path)
-                self.patch_size = [self.trajectories[0][2], self.trajectories[0][3]]
-                bounding_boxes = [
-                    (x, y, int(self.patch_size[0]), int(self.patch_size[1]))
-                    for x, y, _, _ in self.trajectories
-                ]
-            else:
-                # generate a renadom trajectories
-                self.generate_fixed_step_trajectory()
-                bounding_boxes = [
-                    (x, y, int(self.patch_size[0]), int(self.patch_size[1]))
-                    for x, y, _, _ in self.trajectories
-                ]
+        if len(self.patch_size) > 0:
+            try:
+                first_cam_id = self.parser.camera_ids[self.indices[0]]
+                # imsize_dict는 왜곡 보정 후 ROI 크기일 수 있으므로 주의. 첫 이미지 직접 로드 고려?
+                # 우선 imsize_dict 사용
+                full_width, full_height = self.parser.imsize_dict[first_cam_id]
+                patch_width = int(self.patch_size[0])
+                patch_height = int(self.patch_size[1])
 
-            self.parser.filter_points(self.indices, bounding_boxes)
+                q1 = (0, 0)
+                q2 = (max(0, full_width - patch_width), 0)
+                q3 = (0, max(0, full_height - patch_height))
+                q4 = (max(0, full_width - patch_width), max(0, full_height - patch_height))
+                possible_starts = [q1, q2, q3, q4]
+
+                # --- 추가: 여기서 random 시드 재설정 ---
+                current_seed = int(time.time() * 1000) + os.getpid()
+                random.seed(current_seed) # 현재 시간 + 프로세스 ID 기반 시드
+                # --- 추가 끝 ---
+
+                chosen_start = random.choice(possible_starts)
+                self.fixed_x_start = chosen_start[0]
+                self.fixed_y_start = chosen_start[1]
+
+                print(f"Patch size: {patch_width}x{patch_height}")
+                print(f"Full image size (from imsize_dict): {full_width}x{full_height}")
+                print(f"Randomly chosen fixed crop start: ({self.fixed_x_start}, {self.fixed_y_start}) for all frames.")
+
+                # 기존 trajectory 로딩/생성 및 filter_points 로직 건너뜀
+                # if self.split == 'train': # filter_points는 train에서만 필요했었음
+                #    self.parser.filter_points(self.indices, bounding_boxes) # <-- 주석 처리
+
+            except Exception as e:
+                print(f"Warning: Could not determine random fixed crop start. Using (0,0). Error: {e}")
+                self.fixed_x_start = 0
+                self.fixed_y_start = 0
+        # --- 수정 끝 ---
+
+        # filter_points_sparse는 크롭과 무관하게 train split에서 호출될 수 있음
+        if split == "train":
+            self.parser.filter_points_sparse(self.indices)
 
         self.load_image_into_memory()
         if split == "train" and self.args.mono_depth:
@@ -539,42 +544,61 @@ class Dataset:
         for i, index in enumerate(self.indices):
             image_path = self.parser.image_paths[index]
             image_name = self.parser.image_names[index]
-            # Extract scene name and image name from path
 
             image = imageio.imread(self.parser.image_paths[index])[..., :3]
-            height, width = image.shape[:2]
+            height, width = image.shape[:2] # 원본 이미지 높이, 너비
             camera_id = self.parser.camera_ids[index]
-            K = self.parser.Ks_dict[camera_id].copy()  # undistorted K
+            K = self.parser.Ks_dict[camera_id].copy()
             params = self.parser.params_dict[camera_id]
             c2w = self.parser.camtoworlds[index]
             mask = self.parser.mask_dict[camera_id]
             w2c = np.linalg.inv(c2w)
 
             if len(params) > 0:
-                # Images are distorted. Undistort them.
                 mapx, mapy = (
                     self.parser.mapx_dict[camera_id],
                     self.parser.mapy_dict[camera_id],
                 )
                 image = cv2.remap(image, mapx, mapy, cv2.INTER_LINEAR)
-                x, y, w, h = self.parser.roi_undist_dict[camera_id]
-                image = image[y : y + h, x : x + w]
+                # 왜곡 보정 후 실제 이미지 크기 업데이트
+                height, width = image.shape[:2]
+                # ROI 적용 부분은 제거됨 (만약 있었다면)
+                # x, y, w_roi, h_roi = self.parser.roi_undist_dict[camera_id]
+                # image = image[y : y + h_roi, x : x + w_roi]
+                # height, width = image.shape[:2]
 
             if len(self.patch_size) > 0:
-                # # Random crop.self.patch_size
-                if len(self.trajectories[0]) == 4:
-                    x_start, y_start, _, _ = self.trajectories[index]
-                else:
-                    x_start, y_start = self.trajectories[index]
-                image = image[
-                    y_start : y_start + int(self.patch_size[1]),
-                    x_start : x_start + int(self.patch_size[0]),
-                ]
-                # print(image.shape)
-                K[0, 2] -= x_start
-                K[1, 2] -= y_start
+                # --- 수정: 고정된 크롭 좌표 사용 ---
+                x_start = self.fixed_x_start
+                y_start = self.fixed_y_start
+                # --- 수정 끝 ---
 
-            h, w = image.shape[:2]
+                patch_width = int(self.patch_size[0])
+                patch_height = int(self.patch_size[1])
+                y_end = y_start + patch_height
+                x_end = x_start + patch_width
+
+                # 크롭 영역이 실제 이미지 경계 내에 있는지 확인 및 조정
+                y_start_clamped = max(0, y_start)
+                x_start_clamped = max(0, x_start)
+                y_end_clamped = min(height, y_end)
+                x_end_clamped = min(width, x_end)
+
+                # 실제 크롭 수행
+                if y_end_clamped > y_start_clamped and x_end_clamped > x_start_clamped:
+                    image = image[ y_start_clamped : y_end_clamped, x_start_clamped : x_end_clamped ]
+                    # K 행렬 조정 (원래 시작점 기준)
+                    K[0, 2] -= x_start # 조정은 원래 계산된 start 기준
+                    K[1, 2] -= y_start # 조정은 원래 계산된 start 기준
+                    # 크롭된 크기로 업데이트
+                    h, w = image.shape[:2]
+                else:
+                    print(f"Warning: Invalid calculated crop region for index {index}. Using original image.")
+                    h, w = image.shape[:2] # 크롭 실패 시 크기 유지
+
+            else:
+                # If not cropping, use the dimensions after potential undistortion
+                h, w = image.shape[:2]
 
             cam_info = CameraInfo(
                 uid=i,
@@ -583,8 +607,8 @@ class Dataset:
                 w2c=w2c,
                 image_name=image_name,
                 image_path=image_path,
-                width=w,
-                height=h,
+                width=w, # 최종 사용될 이미지의 너비 (크롭되었을 수 있음)
+                height=h, # 최종 사용될 이미지의 높이 (크롭되었을 수 있음)
             )
 
             data = {
@@ -594,7 +618,9 @@ class Dataset:
             }
 
             if mask is not None:
-                data["mask"] = torch.from_numpy(mask)
+                 # 마스크도 동일하게 크롭해야 할 수 있음 (현재 로직 없음)
+                 # data["mask"] = torch.from_numpy(mask)
+                 pass
 
             self.data_list.append(data)
 

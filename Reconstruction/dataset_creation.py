@@ -81,7 +81,7 @@ def worker_process_scene(args, base_data_dir, base_output_dir, scene_info):
 
     print(f"\n[GPU {gpu_id}] Running train command for {scene_name}:")
     try:
-        subprocess.run(train_cmd, check=True, env=env, capture_output=args.quiet, text=True, stdout=subprocess.DEVNULL)
+        subprocess.run(train_cmd, check=True, env=env, capture_output=args.quiet, text=True)
         print(f"\n[GPU {gpu_id}] Training finished for scene: {scene_name}")
     except subprocess.CalledProcessError as e:
         print(f"[GPU {gpu_id}] Error during training for scene {scene_name}:")
@@ -131,10 +131,10 @@ if __name__ == "__main__":
     parser.add_argument('--sparse_view', type=int, default=0)
     parser.add_argument('--downsample_factor', type=int, default=2)
     parser.add_argument('--diffusion_resize_width', type=int, default=960)
-    parser.add_argument('--diffusion_resize_height', type=int, default=512)
+    parser.add_argument('--diffusion_resize_height', type=int, default=540)
     parser.add_argument('--diffusion_crop_width', type=int, default=960)
-    parser.add_argument('--diffusion_crop_height', type=int, default=512)
-    parser.add_argument('--patch_size', nargs=2, type=int, default=[480, 256])
+    parser.add_argument('--diffusion_crop_height', type=int, default=540)
+    parser.add_argument('--patch_size', nargs=2, type=int, default=[480, 270])
     parser.add_argument('--opacity_reset_interval', type=int, default=9000)
     parser.add_argument('--lambda_dist', type=float, default=0.0)
     parser.add_argument('--lambda_reg', type=float, default=0.5)
